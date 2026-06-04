@@ -1,0 +1,19 @@
+.DS_Store
+*.ipynb
+.vscode/
+assets/
+*.pyc
+
+# Ignore Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# dataset
+dataset/
+
+# Ignore model checkpoints
+checkpoint/
+*.pth
+*.pt
+
+# logs
+wandb/
