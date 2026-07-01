@@ -1,4 +1,4 @@
-""" Code adapted from https://github.com/hassony2/inflated_convnets_pytorch """
+"""Code adapted from https://github.com/hassony2/inflated_convnets_pytorch"""
 
 import math
 
@@ -10,7 +10,16 @@ from merlin.models import inflate
 
 class I3ResNet(torch.nn.Module):
     def __init__(
-        self, resnet2d, frame_nb=16, class_nb=1000, conv_class=False, return_skips=False, ImageEmbedding=False
+        self,
+        resnet2d,
+        frame_nb=16,
+        class_nb=1000,
+        conv_class=False,
+        return_skips=False,
+        ImageEmbedding=False,
+        HCCClassification=False,
+        PhenotypeCls=False,
+        rotate_flip=False,
     ):
         """
         Args:
@@ -21,7 +30,9 @@ class I3ResNet(torch.nn.Module):
         self.return_skips = return_skips
         self.conv_class = conv_class
         self.ImageEmbedding = ImageEmbedding
-
+        self.HCCClassification = HCCClassification
+        self.PhenotypeCls = PhenotypeCls
+        self.rotate_flip = rotate_flip
         self.conv1 = inflate.inflate_conv(
             resnet2d.conv1, time_dim=3, time_padding=1, center=True
         )
@@ -47,45 +58,25 @@ class I3ResNet(torch.nn.Module):
             self.contrastive_head = torch.nn.Conv3d(
                 in_channels=2048, out_channels=512, kernel_size=(1, 1, 1), bias=True
             )
+            self.hcc_classifier = torch.nn.Conv3d(
+                in_channels=2048,
+                out_channels=1,
+                kernel_size=(1, 1, 1),
+                bias=True,
+            )
         else:
             final_time_dim = int(math.ceil(frame_nb / 16))
             self.avgpool = inflate.inflate_pool(
                 resnet2d.avgpool, time_dim=final_time_dim
             )
             self.fc = inflate.inflate_linear(resnet2d.fc, 1)
-        
-    def extract_features(self, x):
-        skips = []
-        x = x.permute(0, 1, 4, 2, 3)
-        x = torch.cat((x, x, x), dim=1)
-        if self.return_skips:
-            skips.append(x.permute(0, 1, 3, 4, 2))
-        x = self.conv1(x)
-        x = self.bn1(x)
-        x = self.relu(x)
-        if self.return_skips:
-            skips.append(x.permute(0, 1, 3, 4, 2))
-        x = self.maxpool(x)
-
-        x = checkpoint.checkpoint(self.layer1, x)
-        if self.return_skips:
-            skips.append(x.permute(0, 1, 3, 4, 2))
-        x = checkpoint.checkpoint(self.layer2, x)
-        if self.return_skips:
-            skips.append(x.permute(0, 1, 3, 4, 2))
-        x = checkpoint.checkpoint(self.layer3, x)
-        if self.return_skips:
-            skips.append(x.permute(0, 1, 3, 4, 2))
-        x = checkpoint.checkpoint(self.layer4, x)
-        if self.return_skips:
-            skips.append(x.permute(0, 1, 3, 4, 2))
-                    
-        if self.conv_class:
-            x_features = self.avgpool(x)
-            
-        return x_features
 
     def forward(self, x):
+        if self.rotate_flip:
+            # if the model was trained in a legacy orientation
+            # we rotate and flip into the standard view
+            x = torch.rot90(x, k=1, dims=[2, 3])
+            x = torch.flip(x, dims=[3])
         skips = []
         x = x.permute(0, 1, 4, 2, 3)
         x = torch.cat((x, x, x), dim=1)
@@ -98,25 +89,39 @@ class I3ResNet(torch.nn.Module):
             skips.append(x.permute(0, 1, 3, 4, 2))
         x = self.maxpool(x)
 
-        x = checkpoint.checkpoint(self.layer1, x)
-        if self.return_skips:
-            skips.append(x.permute(0, 1, 3, 4, 2))
-        x = checkpoint.checkpoint(self.layer2, x)
-        if self.return_skips:
-            skips.append(x.permute(0, 1, 3, 4, 2))
-        x = checkpoint.checkpoint(self.layer3, x)
-        if self.return_skips:
-            skips.append(x.permute(0, 1, 3, 4, 2))
-        x = checkpoint.checkpoint(self.layer4, x)
-        if self.return_skips:
-            skips.append(x.permute(0, 1, 3, 4, 2))
-                    
+        if self.HCCClassification or self.PhenotypeCls:
+            x = self.layer1(x)
+            if self.return_skips:
+                skips.append(x.permute(0, 1, 3, 4, 2))
+            x = self.layer2(x)
+            if self.return_skips:
+                skips.append(x.permute(0, 1, 3, 4, 2))
+            x = self.layer3(x)
+            if self.return_skips:
+                skips.append(x.permute(0, 1, 3, 4, 2))
+            x = self.layer4(x)
+            if self.return_skips:
+                skips.append(x.permute(0, 1, 3, 4, 2))
+        else:
+            x = checkpoint.checkpoint(self.layer1, x)
+            if self.return_skips:
+                skips.append(x.permute(0, 1, 3, 4, 2))
+            x = checkpoint.checkpoint(self.layer2, x)
+            if self.return_skips:
+                skips.append(x.permute(0, 1, 3, 4, 2))
+            x = checkpoint.checkpoint(self.layer3, x)
+            if self.return_skips:
+                skips.append(x.permute(0, 1, 3, 4, 2))
+            x = checkpoint.checkpoint(self.layer4, x)
+            if self.return_skips:
+                skips.append(x.permute(0, 1, 3, 4, 2))
+
         if self.conv_class:
             x_features = self.avgpool(x)
-            
+
             if self.ImageEmbedding:
                 return x_features.squeeze(2).squeeze(2).squeeze(2).unsqueeze(0)
-            
+
             x_ehr = self.classifier(x_features)
             x_ehr = x_ehr.squeeze(3)
             x_ehr = x_ehr.squeeze(3)
@@ -125,10 +130,18 @@ class I3ResNet(torch.nn.Module):
             x_contrastive = x_contrastive.squeeze(3)
             x_contrastive = x_contrastive.squeeze(3)
             x_contrastive = x_contrastive.mean(2)
+            x_hcc = self.hcc_classifier(x_features)
+            x_hcc = x_hcc.squeeze(3)
+            x_hcc = x_hcc.squeeze(3)
+            x_hcc = x_hcc.mean(2)
             if self.return_skips:
-                return x_contrastive, x_ehr, skips
+                return x_contrastive, x_ehr, x_hcc, skips
             else:
-                return x_contrastive, x_ehr
+                if self.HCCClassification:
+                    return torch.sigmoid(x_hcc)
+                if self.PhenotypeCls:
+                    return torch.sigmoid(x_ehr)
+                return x_contrastive, x_ehr, x_hcc
         else:
             x = self.avgpool(x)
             x_reshape = x.view(x.size(0), -1)
@@ -189,19 +202,19 @@ class Bottleneck3d(torch.nn.Module):
             out = self.conv3(out)
             out = self.bn3(out)
             return out
-        
         residual = x
 
         if self.downsample is not None:
             residual = self.downsample(x)
 
         if x.requires_grad:
-            out = checkpoint.checkpoint(run_function, x)
+            out = checkpoint.checkpoint(run_function, x, use_reentrant=False)
         else:
             out = run_function(x)
 
         out = out + residual
         out = self.relu(out)
+        # out = self.dropout(out)
         return out
 
 

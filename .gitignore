@@ -8,7 +8,9 @@ assets/
 .ipynb_checkpoints/
 
 # dataset
-dataset/
+*data*
+/stanford_cars
+/Dassl.pytorch
 
 # Ignore model checkpoints
 checkpoint/

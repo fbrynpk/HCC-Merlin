@@ -9,7 +9,7 @@ import torch
 from monai.data.utils import SUPPORTED_PICKLE_MOD
 from monai.utils import look_up_option
 
-from merlin.data.monai_transforms import ImageTransforms, VerseImageTransforms
+from merlin.data.monai_transforms import ImageTransforms, InterpolateImageTransforms, VerseImageTransforms
 
 
 
@@ -120,3 +120,26 @@ class VerseDataLoader(monai.data.DataLoader):
             num_workers=num_workers,
         )
         
+class InterpolateDataLoader(monai.data.DataLoader):
+    def __init__(
+        self,
+        datalist: List[dict],
+        cache_dir: str,
+        batchsize: int,
+        shuffle: bool = True,
+        num_workers: int = 0,
+    ):
+        self.datalist = datalist
+        self.cache_dir = cache_dir
+        self.batchsize = batchsize
+        self.dataset = CTPersistentDataset(
+            data=datalist,
+            transform=InterpolateImageTransforms,
+            cache_dir=cache_dir,
+        )
+        super().__init__(
+            self.dataset,
+            batch_size=batchsize,
+            shuffle=shuffle,
+            num_workers=num_workers,
+        )

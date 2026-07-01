@@ -1,6 +1,7 @@
 import os
 
 import torch
+import pandas as pd
 from huggingface_hub import hf_hub_download
 from torch import nn
 
@@ -9,9 +10,12 @@ from merlin.utils import download_file
 
 
 class Merlin(nn.Module):
-    def __init__(self, ImageEmbedding: bool = False):
+    def __init__(self, ImageEmbedding: bool = False, HCCClassification: bool = False, PhenotypeCls: bool = False, rotate_flip: bool = False):
         super(Merlin, self).__init__()
         self.ImageEmbedding = ImageEmbedding
+        self.HCCClassification = HCCClassification
+        self.PhenotypeCls = PhenotypeCls
+        self.rotate_flip = rotate_flip
         self.current_path = os.path.dirname(os.path.abspath(__file__))
         self.local_dir = os.path.join(self.current_path, "checkpoints")
         self.checkpoint_name = (
@@ -19,15 +23,22 @@ class Merlin(nn.Module):
         )
         self.repo_id = "stanfordmimi/Merlin"
         self.model = self._load_model()
+        self.targets = ["HCC"]
+        # self.targets = pd.read_csv("/media/ryan/T500/Merlin/documentation/phenotypes.csv")["phecode_str"].tolist()
 
     '''
     Load the Merlin model with the initialized weights
     '''
     def _load_model(self):
         self._download_checkpoint()
-        model = MerlinArchitecture(ImageEmbedding=self.ImageEmbedding)
+        model = MerlinArchitecture(
+            ImageEmbedding=self.ImageEmbedding,
+            HCCClassification=self.HCCClassification,
+            PhenotypeCls=self.PhenotypeCls,
+            rotate_flip=self.rotate_flip
+        )
         model.load_state_dict(
-            torch.load(os.path.join(self.local_dir, self.checkpoint_name))
+            torch.load(os.path.join(self.local_dir, self.checkpoint_name)), strict=False
         )
         return model
 

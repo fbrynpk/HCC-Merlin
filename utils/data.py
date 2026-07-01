@@ -1,5 +1,5 @@
 import os
-from merlin.data import DataLoader, AugmentedDataLoader
+from merlin.data import DataLoader
 
 def process_data(df, image_root, negative_root):
     datalist = []
