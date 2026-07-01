@@ -79,6 +79,7 @@ def parse_args():
     # Training hyperparameters
     parser.add_argument("--epochs", type=int, default=25)
     parser.add_argument("--batch_size", type=int, default=18)
+    parser.add_argument("--n_ctx", type=int, default=4)
     parser.add_argument("--learning_rate", type=float, default=1e-4)
     parser.add_argument(
         "--phase",
@@ -92,6 +93,11 @@ def parse_args():
         type=str,
         default="full",
         choices=["full", "lora"],
+    )
+    parser.add_argument(
+        "--use_coop",
+        action="store_true",
+        help="Whether to use Context Optimization learning",
     )
     parser.add_argument("--evaluate", action="store_true")
     parser.add_argument("--use_wandb", action="store_true")

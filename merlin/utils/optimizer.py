@@ -42,9 +42,9 @@ def image_group_key(name: str) -> str:
 
 def _should_exclude(name: str, param: torch.Tensor) -> bool:
     """Return True for params that should have zero weight decay."""
-    return (
-        param.ndim < 2
-        or any(tag in name for tag in ("bn", "ln", "LayerNorm", "bias", "logit_scale", "temperature"))
+    return param.ndim < 2 or any(
+        tag in name
+        for tag in ("bn", "ln", "LayerNorm", "bias", "logit_scale", "temperature")
     )
 
 
@@ -99,12 +99,14 @@ def build_lldr_groups(
         used_param_ids.add(id(p))
         wd = 0.0 if _should_exclude(name, p) else weight_decay
 
-        param_groups.append({
-            "name": f"{prefix}:{name}",
-            "params": [p],
-            "lr": lr,
-            "weight_decay": wd,
-        })
+        param_groups.append(
+            {
+                "name": f"{prefix}:{name}",
+                "params": [p],
+                "lr": lr,
+                "weight_decay": wd,
+            }
+        )
 
     return param_groups
 
@@ -162,10 +164,33 @@ def build_param_groups_image_text_lldr(
         group_key_fn=text_group_key,
     )
 
-    return img_groups + txt_groups
+    prompt_groups = []
+    if getattr(model.model, "use_coop", False) and hasattr(
+        model.model, "prompt_learner"
+    ):
+        prompt_params = []
+        for name, param in model.model.prompt_learner.named_parameters():
+            if not param.requires_grad or id(param) in used_param_ids:
+                continue
+            used_param_ids.add(id(param))
+            prompt_params.append(param)
+
+        if prompt_params:
+            prompt_groups.append(
+                {
+                    "name": "txt:prompt_learner",
+                    "params": prompt_params,
+                    "lr": base_lr_txt,
+                    "weight_decay": 0.0,
+                }
+            )
+
+    return img_groups + txt_groups + prompt_groups
 
 
-def build_optimizer_and_scheduler(model, param_groups, args, total_steps, warmup_steps=0):
+def build_optimizer_and_scheduler(
+    model, param_groups, args, total_steps, warmup_steps=0
+):
     """
     Construct AdamW optimizer with a warmup → cosine decay schedule.
 
@@ -184,19 +209,27 @@ def build_optimizer_and_scheduler(model, param_groups, args, total_steps, warmup
         isinstance(model.model.temperature, nn.Parameter)
         and model.model.temperature.requires_grad
     ):
-        param_groups.append({
-            "name": "scalar:temperature",
-            "params": [model.model.temperature],
-            "lr": args.learning_rate,
-            "weight_decay": 0.0,
-        })
+        param_groups.append(
+            {
+                "name": "scalar:temperature",
+                "params": [model.model.temperature],
+                "lr": args.learning_rate,
+                "weight_decay": 0.0,
+            }
+        )
+    # if args.use_coop:
+    optimizer = torch.optim.SGD(param_groups, weight_decay=1e-4)
+    print(optimizer.param_groups[0]["params"][0].shape)
+    print(optimizer.param_groups[0]["lr"])
 
-    optimizer = torch.optim.AdamW(param_groups, betas=(0.9, 0.999))
+    # else:
+    # optimizer = torch.optim.AdamW(param_groups, betas=(0.9, 0.999))
 
     warmup_scheduler = torch.optim.lr_scheduler.LambdaLR(
         optimizer,
-        lr_lambda=lambda step: float(step) / float(max(1, warmup_steps))
-        if step < warmup_steps else 1.0,
+        lr_lambda=lambda step: (
+            float(step) / float(max(1, warmup_steps)) if step < warmup_steps else 1.0
+        ),
     )
     decay_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=max(1, total_steps - warmup_steps), eta_min=0
@@ -208,6 +241,7 @@ def build_optimizer_and_scheduler(model, param_groups, args, total_steps, warmup
     )
 
     from torch.cuda.amp import GradScaler
+
     scaler = GradScaler()
 
     return optimizer, scheduler, scaler

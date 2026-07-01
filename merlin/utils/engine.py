@@ -50,10 +50,13 @@ def train_one_epoch(
 
     for batch in pbar:
         image = batch["image"].to(device)
-        text_key = "full_text" if global_step % 2 == 0 else "anatomy_text"
-        text = [t.lower() for t in batch[text_key]]
 
-        # labels = batch["labels"].to(device).view(-1, 1).float()
+        if args.use_coop and not args.tuning_mode == "lora":
+            text = None
+            labels = batch["labels"].to(device).view(-1, 1).float()
+        else:
+            text_key = "full_text" if global_step % 2 == 0 else "anatomy_text"
+            text = [t.lower() for t in batch[text_key]]
 
         scheduler.step()
         temperature = model.model.temperature
@@ -65,25 +68,45 @@ def train_one_epoch(
             txt_emb = txt_emb / txt_emb.norm(dim=-1, keepdim=True)
 
             image_embeddings.append(img_emb.detach().cpu())
-            text_embeddings.append(txt_emb.detach().cpu())
 
-            img_logits = (img_emb @ txt_emb.T) / temperature
-            n = len(img_emb)
-            targets = torch.arange(n, device=device)
+            if args.use_coop and not args.tuning_mode == "lora":
+                logits = (img_emb @ txt_emb.T) / temperature
+                # logits = torch.einsum("bd,bcd->bc", img_emb, txt_emb) / temperature
+                ctr_loss = nn.CrossEntropyLoss()(logits, labels.view(-1).long())
 
-            ctr_loss = (
-                nn.CrossEntropyLoss()(img_logits, targets)
-                + nn.CrossEntropyLoss()(img_logits.T, targets)
-            ) / 2
+                # Use BCEWithLogitsLoss for multi-label classification in CoOp mode
+
+                # Reshape logits from [BS, 2] to [BS, 1] if necessary
+                # if logits.shape[1] == 2:
+                #     logits = logits[:, 1].unsqueeze(1)  # Keep only the positive class logits
+
+                # ctr_loss = nn.BCEWithLogitsLoss()(logits, labels)
+            else:
+                text_embeddings.append(txt_emb.detach().cpu())
+
+                img_logits = (img_emb @ txt_emb.T) / temperature
+                n = len(img_emb)
+                targets = torch.arange(n, device=device)
+
+                ctr_loss = (
+                    nn.CrossEntropyLoss()(img_logits, targets)
+                    + nn.CrossEntropyLoss()(img_logits.T, targets)
+                ) / 2
             # cls_loss = classification_loss_fn(hcc_emb, labels)
             loss = ctr_loss
 
         scaler.scale(loss).backward()
 
-        if (global_step + 1) % accumulation_steps == 0:
+        # Turn off gradient accumulation for now to see if it helps with training stability. Will re-enable after confirming.
+        if args.use_coop and not args.tuning_mode == "lora":
             scaler.step(optimizer)
             scaler.update()
             optimizer.zero_grad()
+
+        # if (global_step + 1) % accumulation_steps == 0:
+        #     scaler.step(optimizer)
+        #     scaler.update()
+        #     optimizer.zero_grad()
 
         loss_val = loss.detach().item()
         total_loss += loss_val
@@ -91,19 +114,27 @@ def train_one_epoch(
         # cls_loss_sum += cls_loss.detach().item()
 
         if args.use_wandb:
-            wandb.log({
-                "train_batch_loss": loss_val,
-                "train_contrastive_loss": ctr_loss.detach().item(),
-                # "train_classification_loss": cls_loss.detach().item(),
-                "train_learning_rate": optimizer.param_groups[0]["lr"],
-                "temperature": temperature.item(),
-            }, step=global_step)
+            wandb.log(
+                {
+                    "train_batch_loss": loss_val,
+                    "train_contrastive_loss": ctr_loss.detach().item(),
+                    # "train_classification_loss": cls_loss.detach().item(),
+                    "train_learning_rate": optimizer.param_groups[0]["lr"],
+                    "temperature": temperature.item(),
+                },
+                step=global_step,
+            )
 
         global_step += 1
 
     img_feats = torch.cat(image_embeddings, dim=0)
-    txt_feats = torch.cat(text_embeddings, dim=0)
-    avg_cos = (img_feats * txt_feats).sum(dim=1).mean().item()
+
+    if args.use_coop and not args.tuning_mode == "lora":
+        avg_cos = 0.0
+        txt_feats = txt_emb.detach().cpu()
+    else:
+        txt_feats = torch.cat(text_embeddings, dim=0)
+        avg_cos = (img_feats * txt_feats).sum(dim=1).mean().item()
 
     torch.cuda.empty_cache()
     n_batches = len(train_loader)
@@ -148,50 +179,80 @@ def validate_one_epoch(
     image_embeddings, text_embeddings = [], []
 
     with torch.no_grad():
-        for batch in tqdm(val_loader, desc=f"Validating Epoch {epoch + 1}/{args.epochs}"):
+        for batch in tqdm(
+            val_loader, desc=f"Validating Epoch {epoch + 1}/{args.epochs}"
+        ):
             image = batch["image"].to(device)
-            text = [t.lower() for t in batch["full_text"]]
+
+            if args.use_coop and not args.tuning_mode == "lora":
+                text = None
+                labels = batch["labels"].to(device).view(-1, 1).float()
+            else:
+                text = [t.lower() for t in batch["full_text"]]
 
             temperature = model.model.temperature
 
-            with torch.amp.autocast_mode.autocast(device_type=device, dtype=torch.float16):
+            with torch.amp.autocast_mode.autocast(
+                device_type=device, dtype=torch.float16
+            ):
                 img_emb, _, hcc_emb, txt_emb = model(image, text)
 
                 img_emb = img_emb / img_emb.norm(dim=-1, keepdim=True)
                 txt_emb = txt_emb / txt_emb.norm(dim=-1, keepdim=True)
 
                 image_embeddings.append(img_emb.detach().cpu())
+
                 text_embeddings.append(txt_emb.detach().cpu())
 
-                img_logits = (img_emb @ txt_emb.T) / temperature
-                n = len(img_emb)
-                targets = torch.arange(n, device=device)
+                if args.use_coop and not args.tuning_mode == "lora":
+                    logits = (img_emb @ txt_emb.T) / temperature
+                    # logits = torch.einsum("bd,bcd->bc", img_emb, txt_emb) / temperature
+                    ctr_loss = nn.CrossEntropyLoss()(logits, labels.view(-1).long())
 
-                ctr_loss = (
-                    nn.CrossEntropyLoss()(img_logits, targets)
-                    + nn.CrossEntropyLoss()(img_logits.T, targets)
-                ) / 2
-                # cls_loss = classification_loss_fn(hcc_emb, labels)
+                    # if logits.shape[1] == 2:
+                    #     logits = logits[:, 1].unsqueeze(1)  # Keep only the positive class logits
+
+                    # ctr_loss = nn.BCEWithLogitsLoss()(logits, labels)
+                else:
+                    text_embeddings.append(txt_emb.detach().cpu())
+
+                    img_logits = (img_emb @ txt_emb.T) / temperature
+                    n = len(img_emb)
+                    targets = torch.arange(n, device=device)
+
+                    ctr_loss = (
+                        nn.CrossEntropyLoss()(img_logits, targets)
+                        + nn.CrossEntropyLoss()(img_logits.T, targets)
+                    ) / 2
+                    # cls_loss = classification_loss_fn(hcc_emb, labels)
+
                 loss = ctr_loss
 
             loss_val = loss.detach().item()
-            total_loss += loss_val
             ctr_loss_sum += ctr_loss.detach().item()
             # cls_loss_sum += cls_loss.detach().item()
 
             if args.use_wandb:
-                wandb.log({
-                    "val_batch_loss": loss_val,
-                    "val_contrastive_loss": ctr_loss.detach().item(),
-                    # "val_classification_loss": cls_loss.detach().item(),
-                    "val_temperature": temperature.item(),
-                }, step=global_step)
+                wandb.log(
+                    {
+                        "val_batch_loss": loss_val,
+                        "val_contrastive_loss": ctr_loss.detach().item(),
+                        # "val_classification_loss": cls_loss.detach().item(),
+                        "val_temperature": temperature.item(),
+                    },
+                    step=global_step,
+                )
 
             global_step += 1
 
     img_feats = torch.cat(image_embeddings, dim=0)
-    txt_feats = torch.cat(text_embeddings, dim=0)
-    avg_cos = (img_feats * txt_feats).sum(dim=1).mean().item()
+
+    if args.use_coop and not args.tuning_mode == "lora":
+        avg_cos = 0.0
+        txt_feats = txt_emb.detach().cpu()
+    else:
+        txt_feats = torch.cat(text_embeddings, dim=0)
+        avg_cos = (img_feats * txt_feats).sum(dim=1).mean().item()
 
     torch.cuda.empty_cache()
     n_batches = len(val_loader)

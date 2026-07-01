@@ -1,7 +1,7 @@
 import os
 
-import torch
 import pandas as pd
+import torch
 from huggingface_hub import hf_hub_download
 from torch import nn
 
@@ -10,8 +10,20 @@ from merlin.utils import download_file
 
 
 class Merlin(nn.Module):
-    def __init__(self, ImageEmbedding: bool = False, HCCClassification: bool = False, PhenotypeCls: bool = False, rotate_flip: bool = False):
+    def __init__(
+        self,
+        classnames: list = ["negative", "hcc"],
+        n_ctx: int = 16,
+        use_coop: bool = False,
+        ImageEmbedding: bool = False,
+        HCCClassification: bool = False,
+        PhenotypeCls: bool = False,
+        rotate_flip: bool = False,
+    ):
         super(Merlin, self).__init__()
+        self.classnames = classnames
+        self.n_ctx = n_ctx
+        self.use_coop = use_coop
         self.ImageEmbedding = ImageEmbedding
         self.HCCClassification = HCCClassification
         self.PhenotypeCls = PhenotypeCls
@@ -26,25 +38,30 @@ class Merlin(nn.Module):
         self.targets = ["HCC"]
         # self.targets = pd.read_csv("/media/ryan/T500/Merlin/documentation/phenotypes.csv")["phecode_str"].tolist()
 
-    '''
+    """
     Load the Merlin model with the initialized weights
-    '''
+    """
+
     def _load_model(self):
         self._download_checkpoint()
         model = MerlinArchitecture(
+            classnames=self.classnames,
+            n_ctx=self.n_ctx,
+            use_coop=self.use_coop,
             ImageEmbedding=self.ImageEmbedding,
             HCCClassification=self.HCCClassification,
             PhenotypeCls=self.PhenotypeCls,
-            rotate_flip=self.rotate_flip
+            rotate_flip=self.rotate_flip,
         )
         model.load_state_dict(
             torch.load(os.path.join(self.local_dir, self.checkpoint_name)), strict=False
         )
         return model
 
-    ''' 
+    """ 
     Download the Merlin weights from the Hugging Face Hub
-    '''
+    """
+
     def _download_checkpoint(self):
         download_file(
             repo_id=self.repo_id,
